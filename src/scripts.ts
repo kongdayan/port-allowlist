@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { localizeScript } from './script-locale';
 
 export async function download(request: Request): Promise<Response> {
   if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
@@ -9,7 +10,7 @@ export async function download(request: Request): Promise<Response> {
   if (!source.ok) return new Response('Script unavailable', { status: 503 });
   const origin = u.origin;
   if (!/^https?:\/\/[a-zA-Z0-9.:-]+$/.test(origin)) return new Response('Invalid origin', { status: 400 });
-  return new Response((windows ? '\uFEFF' : '') + (await source.text()).replaceAll('__SERVICE_ORIGIN__', origin), { headers: {
+  return new Response((windows ? '\uFEFF' : '') + localizeScript((await source.text()).replaceAll('__SERVICE_ORIGIN__', origin),u.searchParams.get('lang')==='zh-CN'?'zh-CN':'en'), { headers: {
     'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `attachment; filename="${name}"`,
     'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
   } });

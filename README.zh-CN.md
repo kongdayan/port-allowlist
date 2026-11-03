@@ -1,68 +1,78 @@
-# Port Allowlist · 端口 IP 自助白名单
+# Port Allowlist · 端口访问授权
 
-把一个 TCP 端口的访问授权交给客户自助管理。Cloudflare 托管网页与控制 API，ECS 上的小服务使用阿里云 API 同步安全组。**阿里云凭据只放在 ECS，业务流量直接到服务器。**
+**面向客户的阿里云单端口 IP 自助白名单。**
 
-[English](README.md) · [部署指南](docs/deployment.md) · [安全边界](docs/security.md) · [接口说明](docs/api.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [使用文档](https://kongdayan.github.io/port-allowlist/zh-cn/) · [交互演示](https://kongdayan.github.io/port-allowlist/demo/?lang=zh-CN)
 
-## 本地开箱体验
+给客户一个专属入口和登录令牌，就能授权当前网络、选择到期日期、续期或删除访问，以及连接自动更新设备。网页由 Cloudflare 托管，阿里云凭据只留在 ECS；业务流量直接进入您的服务。
 
-需要 Node.js 22.18+；Agent 测试需要 Python 3.10+。本地体验不需要 Cloudflare 或阿里云密钥。
+![客户页面：演示数据已明确标注，地址已掩码](docs/screenshots/portal-zh.png)
+
+## 一分钟体验
+
+需要 Node.js **22.23.4+** 和 npm。`npm ci` 会同时安装文档站依赖，无需任何云凭据。
 
 ```sh
 git clone https://github.com/kongdayan/port-allowlist.git
 cd port-allowlist
 npm ci
-npm run setup
-npm run dev
+npm run demo
 ```
 
-保持服务运行，在第二个终端执行 `npm run bootstrap`。
+打开 Vite 输出的地址，即可添加、续期、删除模拟授权，切换语言、外观、客户 / 管理员角色和同步状态。演示独立运行在浏览器内存中，不调用云 API；刷新或重置后清空改动。
 
-- 管理员入口：`http://localhost:8798`。在本机查看 `.local/credentials.json` 的 `admin` 字段后登录。
-- 客户入口：`http://client.localhost:8798`。登录令牌在 `.local/client.json` 的 `key` 字段。
-- 初始客户有 100 条 IP 授权、10 台自动设备；额度由管理员控制。
-- 本地没有连接 ECS 同步器，会如实显示等待同步；没有虚构流量，也不会修改本机防火墙。
-
-初始化会自动生成随机密钥并保存为仅当前用户可读文件；再次运行不更换密钥。不要把 `.local`、`.dev.vars` 或云凭据放入 Git。
-
-## 客户能做什么
-
-- 单令牌进入专属域名，只看自己的授权、设备和访问活动。
-- 手动添加 / 删除 / 续期 IP；默认 30 个自然日，指定到期日 UTC+8 的 00:00 到期。
-- 点击获取当前公网 IPv4；自动设备按心跳登记当前出口并续期。
-- 查看实时连接、采样流量、来源节点图和逻辑架构图。
-- 管理员明确委托后，可删除该端口原有的来源规则；删除须等待 ECS 确认。
-
-自动设备密钥与网页登录令牌分开。撤销自动设备的某次 IP 授权后，设备下一次心跳可以再次登记；永久停用应撤销设备。
-
-## 生产部署
+如需体验真实 API 与 SQLite 持久存储：
 
 ```sh
-npm run setup -- --operator-host access.example.com --client-host team.example.com --brand 'Your Network' --port 10800
-npx cf auth login
-npm run deploy -- --dry-run
-npm run deploy
-npm run bootstrap -- --url https://access.example.com --client-host team.example.com --name 'Your Team'
+npm run setup
+npm run dev
+# 在第二个终端中执行：
+npm run bootstrap
 ```
 
-准备自己 Cloudflare 账号下的两个域名，然后按[详细部署指南](docs/deployment.md)安装 ECS 同步器。端口、品牌、Worker 名称与入口域名都可配置；ECS 与网页的端口配置必须一致。同步器默认 dry-run；安装程序先预览，不自动启动，不修改 SSH、Docker 或 Nginx。
+管理员入口 `http://localhost:8798`，令牌为 `.local/credentials.json` 的 `admin`；客户入口 `http://client.localhost:8798`，令牌为 `.local/client.json` 的 `key`。请只在本机查看，初始化不会打印密钥。未连接 ECS Agent 时如实显示等待同步，不伪造流量。
 
-需要自己的云账号、DNS 与安全组权限；费用和配额按提供商实际计划计算。不同安全组的放行规则可能叠加，必须检查附加到服务器的所有安全组。
+## v0.2 包含什么
 
-## 验证与限制
+- 以授权管理为主的响应式 UI、完整英文 / 简体中文与浅色 / 深色外观。
+- 获取当前 IP 并预填表单；天数与日期联动，明确提示业务时区零点失效（默认 UTC+8）。
+- 区分已提交、正在同步、已生效、删除中和同步失败；自动刷新保留表单与展开会话。
+- 客户范围隔离、管理员配额配置、一次性设备密钥与多平台更新脚本。
+- 真实 socket 连接 / 字节差分采样、按来源归并的会话活动与逻辑节点图。
+- ECS 本地 Python 同步器：默认预览，先添加确认再删除，明确限定规则归属。
+- 中英 Starlight 文档站、公开交互演示与稳定可翻译的 API 错误码。
+
+## 部署自己的服务
+
+按[部署指南](https://kongdayan.github.io/port-allowlist/zh-cn/deployment/)配置两个 Cloudflare 自定义域名，部署 Worker 与 SQLite Durable Object，再安装受限 ECS Agent。阿里云密钥不会进入 Cloudflare 或客户浏览器。安装器先预览，不自动启动 Agent，也不改动 SSH、Nginx 或 Docker。
+
+| 组件                            | v0.2 支持范围                               |
+| ------------------------------- | ------------------------------------------- |
+| 防火墙提供商                    | 阿里云 ECS 安全组                           |
+| 管理范围                        | 每部署一个安全组、一个配置好的 TCP 端口     |
+| 来源                            | 精确公网 IPv4 授权                          |
+| 控制面                          | Cloudflare Workers + SQLite Durable Objects |
+| 其他云 / Terraform / IPv6 / UDP | 本版不包含                                  |
+
+需使用自己的云账号，权限、费用和配额以提供商实际配置为准。同步器中断时，已下发的云规则不会自行到期；撤销规则也可能保留已有 TCP 连接。Windows 计划任务实机验收仍待完成，生产使用前请阅读[安全边界](https://kongdayan.github.io/port-allowlist/zh-cn/security/)。
+
+## 开发与验证
 
 ```sh
 npm run build
 npm run check
 npm test
 npm run test:agent
+npm run check:content
+npm run build:site
 npx playwright install chromium
 npm run test:browser
+npm run test:site
 npm run audit:public
 ```
 
-支持单部署 / 单安全组 / 单 TCP 端口，IPv4 精确地址授权。默认端口为 10800，可以换成其他 TCP 服务。IPv6、UDP、多安全组联动和其他云厂商暂未实现。Windows 脚本包含密钥安全存储和计划任务逻辑，Windows 实机验收仍待完成。
+Agent 测试需要 Python 3.10+。公开扫描检查暂存源码，应先明确暂存需要发布的文件。`npm run docs:dev` 启动文档站，`npm run build:site` 将文档和演示组装到 `site-dist/`；GitHub Pages 发布物不包含 Worker 后端或凭据。
 
-当前地址、流量与会话日志是敏感运行数据，不应提交到 Issue 或公开日志。云安全组通常是有状态的；撤销规则不保证立即中断已建立的连接。应用异常时不会打开全网，但同步器停机时，已经存在的云规则不会自行到期；应监控服务并配置独立告警。
+[客户指南](https://kongdayan.github.io/port-allowlist/zh-cn/customer-guide/) · [设备安装](https://kongdayan.github.io/port-allowlist/zh-cn/devices/) · [从 v0.1 升级](https://kongdayan.github.io/port-allowlist/zh-cn/upgrade/) · [API](https://kongdayan.github.io/port-allowlist/zh-cn/api/) · [参与贡献](CONTRIBUTING.md)
 
-代码和说明采用 MIT 许可证。详细设计、安全边界与回滚方法见 [docs/security.md](docs/security.md) 和 [docs/deployment.md](docs/deployment.md)。
+采用 MIT 许可证。真实令牌、来源地址、客户资料和部署配置不得进入 Git 或公开 Issue。

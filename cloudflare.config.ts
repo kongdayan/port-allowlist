@@ -16,6 +16,7 @@ export default defineConfig({
       MANAGED_PORT: bindings.text(String(port)),
       OPERATOR_HOSTS: bindings.text(local.operator_hosts || 'localhost,operator.localhost'),
       BRAND: bindings.text(local.brand || 'Port Access'),
+      BUSINESS_TIME_ZONE: bindings.text(local.time_zone || 'Asia/Shanghai'),
     },
     observability: { enabled: true, redactQueryString: true,
       logs: { enabled: true, invocationLogs: false }, traces: { enabled: true, headSamplingRate: 0.05 } },

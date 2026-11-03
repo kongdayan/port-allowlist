@@ -23,7 +23,7 @@ async function call(path, {key=admin, method='GET', data, ip=`${fixtureIP(8,8,8,
   return {status:r.status,data:value,headers:r.headers};
 }
 before(async()=>{
-  const bundle = await build({entryPoints:['src/index.ts'],bundle:true,format:'esm',platform:'neutral',external:['cloudflare:*'],write:false});
+  const bundle = await build({entryPoints:['src/index.ts'],bundle:true,format:'esm',platform:'neutral',mainFields:['module','main'],external:['cloudflare:*'],write:false});
   persistence=await mkdtemp(join(tmpdir(),'proxy-access-test-'));
   options=convertV4MiniflareOptions({durableObjectsPersist:persistence,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-11-02',durableObjects:{DB:{className:'AccessDatabase',useSQLite:true}},bindings:{OPERATOR_HOSTS:"access.example.com,worker.example.com",MANAGED_PORT:"10800",BRAND:"Port Access",ADMIN_KEY_HASH:hash(admin),AGENT_KEY_HASH:hash(agent)}});
   options.resourcePersistencePath=persistence;

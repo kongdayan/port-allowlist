@@ -1,34 +1,53 @@
 {
   "name": "port-allowlist",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "cf dev",
     "build": "cf build",
     "deploy": "cf deploy --secrets-file .local/worker-secrets.json",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p web/tsconfig.json",
     "test": "node --test tests/*.test.mjs",
     "test:agent": "python3 -m unittest discover -s agent/tests -v",
     "setup": "node scripts/setup.mjs",
     "bootstrap": "node scripts/bootstrap.mjs",
     "audit:public": "node scripts/audit-public.mjs",
-    "test:browser": "node tests/browser.mjs"
+    "test:browser": "node tests/browser.mjs",
+    "demo": "vite --config vite.demo.config.ts --mode demo",
+    "build:demo": "vite build --config vite.demo.config.ts --mode demo",
+    "docs:dev": "node scripts/prepare-docs.mjs && npm run dev --prefix docs-site",
+    "docs:build": "node scripts/prepare-docs.mjs && npm run build --prefix docs-site",
+    "build:site": "npm run docs:build && npm run build:demo && node scripts/assemble-site.mjs",
+    "check:content": "node scripts/check-content.mjs",
+    "postinstall": "npm ci --prefix docs-site",
+    "test:site": "node tests/site.mjs",
+    "format": "prettier --write \"web/**/*.{ts,tsx,css}\" \"shared/**/*.ts\" \"docs-site/**/*.{md,mdx,mjs,ts,css,json}\" \"scripts/{assemble-site,check-content,prepare-docs,serve-site}.mjs\" \"tests/{browser,site,i18n,store,errors,timezone,configuration,expiry,setup}.mjs\" src/expiry.ts src/portal.ts src/script-locale.ts README.md README.zh-CN.md",
+    "format:check": "prettier --check \"web/**/*.{ts,tsx,css}\" \"shared/**/*.ts\" \"docs-site/**/*.{md,mdx,mjs,ts,css,json}\" \"scripts/{assemble-site,check-content,prepare-docs,serve-site}.mjs\" \"tests/{browser,site,i18n,store,errors,timezone,configuration,expiry,setup}.mjs\" src/expiry.ts src/portal.ts src/script-locale.ts README.md README.zh-CN.md"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@cloudflare/vite-plugin": "2.0.0-beta.v.9",
     "@cloudflare/workers-types": "5.20261102.1",
     "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "cf": "1.0.0-beta.26",
     "esbuild": "0.28.2",
     "miniflare": "5.20261101.0-beta",
     "playwright": "1.64.1",
+    "prettier": "3.9.10",
     "typescript": "7.0.2",
     "vite": "8.3.5"
   },
   "description": "Self-service, single-port IP allowlists with Cloudflare and an ECS-local Alibaba Cloud synchronizer",
   "license": "MIT",
   "engines": {
-    "node": ">=22.18.0"
+    "node": ">=22.23.4"
+  },
+  "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   }
 }

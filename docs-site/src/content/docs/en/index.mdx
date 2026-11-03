@@ -1,0 +1,53 @@
+---
+title: Your network, authorized.
+description: A customer-friendly IP allowlist for one Alibaba Cloud TCP service.
+template: splash
+hero:
+  tagline: Give customers control of their network access. Keep cloud credentials on ECS.
+  image:
+    file: ../../../../public/screenshots/portal-en.png
+    alt: Customer portal with masked demo addresses
+  actions:
+    - text: Try the interactive demo
+      link: /port-allowlist/demo/
+      icon: right-arrow
+      variant: primary
+    - text: Deploy your own
+      link: /port-allowlist/en/quick-start/
+      icon: right-arrow
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Access comes first" icon="approve-check">
+    Authorize a network, choose a midnight expiry date, and watch synchronization complete. Each
+    customer sees only their own grants.
+  </Card>
+  <Card title="Credentials stay on ECS" icon="lock-locked">
+    Cloudflare hosts the portal and coordination database. A restricted ECS synchronizer updates one
+    Alibaba Cloud security group and TCP port.
+  </Card>
+  <Card title="A demo you can actually use" icon="laptop">
+    Add, renew and remove sample authorizations. Switch languages, themes, roles and failure states
+    without making any cloud requests.
+  </Card>
+</CardGrid>
+
+## Start without cloud credentials
+
+```sh
+git clone https://github.com/kongdayan/port-allowlist.git
+cd port-allowlist
+npm ci
+npm run demo
+```
+
+Open the local URL printed by Vite. This sandbox stays in browser memory; it does not open firewall ports. To exercise the real API and persistent SQLite storage, follow the [local quick start](/port-allowlist/en/quick-start/).
+
+## Supported today
+
+Alibaba Cloud ECS security groups, one configured TCP port, public IPv4 grants. Cloudflare Workers and SQLite Durable Objects provide the control plane. No Terraform or other cloud adapters are included in v0.2.
+
+[Security boundaries](/port-allowlist/en/security/) · [Upgrade from v0.1](/port-allowlist/en/upgrade/) · [MIT source](https://github.com/kongdayan/port-allowlist)

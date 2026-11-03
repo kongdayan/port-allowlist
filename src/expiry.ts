@@ -1,18 +1,61 @@
+import { Temporal } from '@js-temporal/polyfill';
+import { PublicError } from '../shared/errors';
 import { integer } from './policy';
-
-const DAY = 86400, OFFSET = 8 * 3600;
-export const localDay = (at: number) => new Date((at + OFFSET) * 1000).toISOString().slice(0, 10);
-export const dateAfter = (at: number, days: number) => localDay(at + days * DAY);
-export function midnight(value: unknown): number {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('到期日期格式应为 YYYY-MM-DD');
-  const at = Date.parse(value + 'T00:00:00+08:00') / 1000;
-  if (!Number.isFinite(at) || localDay(at) !== value) throw new Error('到期日期无效');
-  return at;
+export const DEFAULT_TIME_ZONE = 'Asia/Shanghai';
+export function validTimeZone(value: string) {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value });
+    return value;
+  } catch {
+    throw new Error('Invalid configured business time zone');
+  }
 }
-export function expiry(data: Record<string, unknown>, at: number, maxDays: number) {
-  if (data.hours !== undefined) throw new Error('授权已改为按天，请刷新页面后重新选择到期日期');
-  const date = data.expire_date === undefined ? dateAfter(at, integer(data.days, 1, maxDays, Math.min(30, maxDays))) : data.expire_date;
-  const expiresAt = midnight(date);
-  if (expiresAt <= at || expiresAt > midnight(dateAfter(at, maxDays))) throw new Error(`到期日期须晚于现在，且不超过 ${maxDays} 个自然日`);
+const fixedOffset = (zone: string) =>
+  zone === 'Asia/Shanghai' ? 28800 : ['UTC', 'Etc/UTC'].includes(zone) ? 0 : null;
+export const localDay = (at: number, timeZone = DEFAULT_TIME_ZONE) => {
+  const offset = fixedOffset(timeZone);
+  return offset === null
+    ? Temporal.Instant.fromEpochMilliseconds(at * 1000)
+        .toZonedDateTimeISO(timeZone)
+        .toPlainDate()
+        .toString()
+    : new Date((at + offset) * 1000).toISOString().slice(0, 10);
+};
+export const dateAfter = (at: number, days: number, timeZone = DEFAULT_TIME_ZONE) =>
+  fixedOffset(timeZone) === null
+    ? Temporal.PlainDate.from(localDay(at, timeZone)).add({ days }).toString()
+    : localDay(at + days * 86400, timeZone);
+export function midnight(value: unknown, timeZone = DEFAULT_TIME_ZONE): number {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value))
+    throw new PublicError(400, 'DATE_FORMAT_INVALID');
+  try {
+    const offset = fixedOffset(timeZone);
+    if (offset !== null) {
+      const at = Date.parse(value + 'T00:00:00Z') / 1000 - offset;
+      if (!Number.isFinite(at) || localDay(at, timeZone) !== value) throw new Error('Invalid date');
+      return at;
+    }
+    const date = Temporal.PlainDate.from(value);
+    const start = date.toZonedDateTime(timeZone);
+    if (start.toPlainDate().toString() !== value) throw new Error('Skipped calendar day');
+    return start.epochMilliseconds / 1000;
+  } catch {
+    throw new PublicError(400, 'DATE_INVALID');
+  }
+}
+export function expiry(
+  data: Record<string, unknown>,
+  at: number,
+  maxDays: number,
+  timeZone = DEFAULT_TIME_ZONE,
+) {
+  if (data.hours !== undefined) throw new PublicError(400, 'DAYS_REQUIRED');
+  const date =
+    data.expire_date === undefined
+      ? dateAfter(at, integer(data.days, 1, maxDays, Math.min(30, maxDays)), timeZone)
+      : data.expire_date;
+  const expiresAt = midnight(date, timeZone);
+  if (expiresAt <= at || expiresAt > midnight(dateAfter(at, maxDays, timeZone), timeZone))
+    throw new PublicError(400, 'DATE_OUT_OF_RANGE', { max: maxDays });
   return { expiresAt, expireDate: String(date) };
 }

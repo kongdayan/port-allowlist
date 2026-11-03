@@ -12,3 +12,12 @@ test('invalid, past, excessive and obsolete hourly grants are rejected',()=>{
  for(const data of [{expire_date:'2026-11-02'},{expire_date:'2026-02-30'},{expire_date:'2028-01-01'},{expire_date:'2026-11-03T00:00:00Z'},{days:0},{days:366},{hours:24}])assert.throws(()=>expiry(data,at,365));
  assert.throws(()=>midnight('2027-02-29'));assert.doesNotThrow(()=>midnight('2028-02-29'));
 });
+
+test('business time zone is independent and handles daylight-saving calendar boundaries',()=>{
+ const start=Date.parse('2026-03-08T05:00:00Z')/1000;
+ const value=expiry({days:1},start,365,'America/New_York');
+ assert.equal(value.expireDate,'2026-03-09');assert.equal(value.expiresAt,Date.parse('2026-03-09T04:00:00Z')/1000);
+ assert.equal(value.expiresAt-start,23*3600);
+ const utc=expiry({expire_date:'2026-11-05'},Date.parse('2026-11-03T16:00:00Z')/1000,365,'UTC');
+ assert.equal(utc.expiresAt,Date.parse('2026-11-05T00:00:00Z')/1000);
+});

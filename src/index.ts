@@ -1,9 +1,9 @@
 import { env } from 'cloudflare:workers';
 import { publicIPv4, covers, integer } from './policy';
 import { download } from './scripts';
-import { expiry, dateAfter, localDay } from './expiry';
+import { expiry, dateAfter, localDay, midnight } from './expiry';
 import { controlSchema } from './control-schema';
-import { operatorHosts, portalHostname, PORT, BRAND, type ClientPortal } from './portal';
+import { operatorHosts, portalHostname, PORT, BRAND, BUSINESS_TIME_ZONE, type ClientPortal } from './portal';
 import { sampleView, type Agent, type Traffic } from './telemetry';
 import { AccessDatabase, Database, Statement } from './storage';
 export { AccessDatabase } from './storage';
@@ -11,7 +11,7 @@ export { AccessDatabase } from './storage';
 type Principal = { role: 'admin' | 'customer' | 'device'; customer: string | null; device: string | null; key: string };
 type Customer = { id: string; name: string; enabled: number; max_devices: number; max_ips: number; lease_minutes: number; grace_seconds: number; max_manual_hours: number; max_manual_days: number; tier: string };
 type Lease = { id: string; customer_id: string; device_id: string | null; ip: string; label: string; previous_ip: string | null; previous_until: number | null; expires_at: number; revoked_at: number | null };
-class Failure extends Error { constructor(public status: number, message: string) { super(message); } }
+import { PublicError as Failure, errorMessages } from '../shared/errors';
 const now = () => Math.floor(Date.now() / 1000);
 const id = () => crypto.randomUUID();
 const db = () => new Database((env.DB as DurableObjectNamespace<AccessDatabase>).getByName(`security-group-tcp${PORT}`));
@@ -31,42 +31,42 @@ function token(kind: string) { return `pa_${kind}_${btoa(String.fromCharCode(...
 async function body(request: Request, limit = 16384): Promise<Record<string, unknown>> {
   if (!request.body) return {};
   const reader = request.body.getReader(); let size = 0; const chunks: Uint8Array[] = [];
-  while (true) { const item = await reader.read(); if (item.done) break; size += item.value.byteLength; if (size > limit) { await reader.cancel(); throw new Failure(413, '请求过大'); } chunks.push(item.value); }
+  while (true) { const item = await reader.read(); if (item.done) break; size += item.value.byteLength; if (size > limit) { await reader.cancel(); throw new Failure(413, 'REQUEST_TOO_LARGE'); } chunks.push(item.value); }
   const all = new Uint8Array(size); let at = 0; for (const c of chunks) { all.set(c, at); at += c.length; }
   try { const data: unknown = size ? JSON.parse(new TextDecoder().decode(all)) : {}; if (!data || typeof data !== 'object' || Array.isArray(data)) throw 0; return data as Record<string, unknown>; }
-  catch { throw new Failure(400, '无效 JSON'); }
+  catch { throw new Failure(400, 'INVALID_JSON'); }
 }
-function label(value: unknown, fallback = '') { const s = typeof value === 'string' ? value.trim() : fallback; if (!s || s.length > 80) throw new Failure(400, '名称长度须为 1–80 字'); return s; }
+function label(value: unknown, fallback = '') { const s = typeof value === 'string' ? value.trim() : fallback; if (!s || s.length > 80) throw new Failure(400, 'INVALID_NAME'); return s; }
 async function rate(key: string, max: number) {
   const t = now(), bucket = `${key}:${Math.floor(t / 60)}`;
   const result = await db().prepare('INSERT INTO rate_limits(id,count,expires_at) VALUES(?,1,?) ON CONFLICT(id) DO UPDATE SET count=count+1 RETURNING count').bind(bucket, t + 120).first<{ count: number }>();
-  if (!result || result.count > max) throw new Failure(429, '请求过于频繁，请稍后再试');
+  if (!result || result.count > max) throw new Failure(429, 'RATE_LIMITED');
 }
 async function keyPrincipal(key: string): Promise<Principal> {
   if (await matches(key, env.ADMIN_KEY_HASH)) return { role: 'admin', customer: null, device: null, key: `admin:${env.ADMIN_KEY_HASH}` };
   const row = await db().prepare(`SELECT k.id,k.kind,k.customer_id,k.device_id FROM api_keys k JOIN customers c ON c.id=k.customer_id
     LEFT JOIN devices d ON d.id=k.device_id WHERE k.token_hash=? AND k.revoked_at IS NULL AND c.enabled=1 AND (k.device_id IS NULL OR d.enabled=1)`).bind(await hashed(key)).first<{ id: string; kind: 'customer' | 'device'; customer_id: string; device_id: string | null }>();
-  if (!row) throw new Failure(401, '密钥无效、已撤销或客户已停用');
+  if (!row) throw new Failure(401, 'INVALID_CREDENTIAL');
   return { role: row.kind, customer: row.customer_id, device: row.device_id, key: row.id };
 }
 async function principal(request: Request): Promise<Principal> {
   const bearer = request.headers.get('Authorization');
   if (bearer?.startsWith('Bearer ')) { const p = await keyPrincipal(bearer.slice(7)); await rate(`key:${p.key}`, 60); return p; }
   const session = /(?:^|;\s*)__Host-pa_session=([^;]+)/.exec(request.headers.get('Cookie') || '')?.[1];
-  if (!session) throw new Failure(401, '请先登录');
+  if (!session) throw new Failure(401, 'LOGIN_REQUIRED');
   const row = await db().prepare('SELECT key_id FROM sessions WHERE token_hash=? AND expires_at>?').bind(await hashed(session), now()).first<{ key_id: string }>();
-  if (!row) throw new Failure(401, '登录已过期');
-  if (!['GET', 'HEAD'].includes(request.method) && request.headers.get('Origin') !== new URL(request.url).origin) throw new Failure(403, '来源校验失败');
+  if (!row) throw new Failure(401, 'SESSION_EXPIRED');
+  if (!['GET', 'HEAD'].includes(request.method) && request.headers.get('Origin') !== new URL(request.url).origin) throw new Failure(403, 'ORIGIN_REJECTED');
   await rate(`session:${row.key_id}`, 60);
   if (row.key_id === `admin:${env.ADMIN_KEY_HASH}`) return { role: 'admin', customer: null, device: null, key: row.key_id };
   const k = await db().prepare(`SELECT k.id,k.customer_id FROM api_keys k JOIN customers c ON c.id=k.customer_id WHERE k.id=? AND k.kind='customer' AND k.revoked_at IS NULL AND c.enabled=1`).bind(row.key_id).first<{ id: string; customer_id: string }>();
-  if (!k) throw new Failure(401, '访问已撤销');
+  if (!k) throw new Failure(401, 'ACCESS_REVOKED');
   return { role: 'customer', customer: k.customer_id, device: null, key: k.id };
 }
-function admin(p: Principal) { if (p.role !== 'admin') throw new Failure(403, '仅管理员可操作'); }
-function portal(p: Principal) { if (p.role === 'device') throw new Failure(403, '设备密钥仅可更新本设备 IP'); }
-function customerId(p: Principal, value: string | null) { const c = p.role === 'admin' ? value : p.customer; if (!c) throw new Failure(400, '请选择客户'); return c; }
-async function customer(cid: string) { const c = await db().prepare('SELECT * FROM customers WHERE id=?').bind(cid).first<Customer>(); if (!c) throw new Failure(404, '客户不存在'); return c; }
+function admin(p: Principal) { if (p.role !== 'admin') throw new Failure(403, 'ADMIN_REQUIRED'); }
+function portal(p: Principal) { if (p.role === 'device') throw new Failure(403, 'DEVICE_SCOPE_ONLY'); }
+function customerId(p: Principal, value: string | null) { const c = p.role === 'admin' ? value : p.customer; if (!c) throw new Failure(400, 'CUSTOMER_REQUIRED'); return c; }
+async function customer(cid: string) { const c = await db().prepare('SELECT * FROM customers WHERE id=?').bind(cid).first<Customer>(); if (!c) throw new Failure(404, 'CUSTOMER_NOT_FOUND'); return c; }
 async function audit(cid: string | null, action: string, ip: string | null, detail: string) { await db().prepare('INSERT INTO audit VALUES(?,?,?,?,?,?)').bind(id(), cid, action, ip, detail, now()).run(); }
 async function state() { const r = await db().prepare("SELECT payload,updated_at FROM agent_state WHERE id='primary'").first<{ payload: string; updated_at: number }>(); return r ? { ...JSON.parse(r.payload) as Agent, updated_at: r.updated_at } : { managed: [], legacy: [], active: {}, error: null, mode: 'unknown', updated_at: 0 } as Agent & { updated_at: number }; }
 async function activeLeases(cid: string | null): Promise<Lease[]> {
@@ -76,12 +76,12 @@ async function activeLeases(cid: string | null): Promise<Lease[]> {
 async function portalForHost(hostname: string): Promise<ClientPortal | null> {
   if (operatorHosts.has(hostname)) return null;
   const row=await db().prepare('SELECT p.hostname,p.customer_id,c.name FROM client_portals p JOIN customers c ON c.id=p.customer_id WHERE p.hostname=? AND c.enabled=1').bind(hostname).first<ClientPortal>();
-  if (!row) throw new Failure(404,'此访问入口暂不可用');
+  if (!row) throw new Failure(404,'PORTAL_UNAVAILABLE');
   return row;
 }
 function scoped(p: Principal, portal: ClientPortal | null) {
-  if (portal && (p.role==='admin' || p.customer!==portal.customer_id)) throw new Failure(403,'此令牌不适用于当前访问入口');
-  if (!portal && p.role==='customer') throw new Failure(403,'请使用专属客户入口');
+  if (portal && (p.role==='admin' || p.customer!==portal.customer_id)) throw new Failure(403,'PORTAL_TOKEN_MISMATCH');
+  if (!portal && p.role==='customer') throw new Failure(403,'CUSTOMER_PORTAL_REQUIRED');
 }
 async function dashboard(p: Principal, selected: string | null) {
   portal(p); const cid = p.role === 'admin' ? selected : p.customer;
@@ -110,9 +110,10 @@ async function dashboard(p: Principal, selected: string | null) {
   const events=eventRows.filter(e=>p.role==='admin'||permitted(String(e.ip))).slice(0,60);
   const picked = customers.find(c => c.id === cid), maxDays = picked?.max_manual_days || 365;
   const traffic = Object.fromEntries(Object.entries(a.traffic || {}).filter(([ip]) => !allowed || permitted(ip)));
-  const publicLeases = leases.map(l => ({ ...l, expire_date: l.device_id ? null : localDay(l.expires_at), expiry_kind: l.device_id ? 'automatic' : (l.expires_at+28800)%86400===0 ? 'date' : 'legacy_hours', applied: live.some(active => active.id === l.id) && now() - a.updated_at < 90 && !a.error && a.mode === 'apply' && [...a.managed, ...a.legacy].some(net => covers(net, l.ip)) }));
-  const common = { port: PORT, devices, firewall_rules:firewallRules, leases: p.role==='admin'?publicLeases:publicLeases.map(({customer_id,...l})=>l),
-    server_time: now(), expiry: { time_zone: 'Asia/Shanghai', today: localDay(now()), default_days: Math.min(30,maxDays), default_expire_date: dateAfter(now(),Math.min(30,maxDays)), max_expire_date: dateAfter(now(),maxDays) }, monitor: { current, history, traffic },
+  const publicLeases = leases.map(l => ({ ...l, removal_pending: !!l.revoked_at && !(a.mode==='apply'&&!a.error&&(a.last_apply||0)>l.revoked_at), expire_date: l.device_id ? null : localDay(l.expires_at,BUSINESS_TIME_ZONE), expiry_kind: l.device_id ? 'automatic' : midnight(localDay(l.expires_at,BUSINESS_TIME_ZONE),BUSINESS_TIME_ZONE)===l.expires_at ? 'date' : 'legacy_hours', applied: live.some(active => active.id === l.id) && now() - a.updated_at < 90 && !a.error && a.mode === 'apply' && [...a.managed, ...a.legacy].some(net => covers(net, l.ip)) }));
+  const sync = { state: !a.updated_at ? 'unavailable' : now()-a.updated_at>=90 ? 'stale' : a.error ? 'error' : a.mode==='apply' ? 'ready' : 'dry_run', updated_at: a.updated_at, last_reconciled_at: a.last_apply || 0 };
+  const common = { synchronization: sync, port: PORT, devices, firewall_rules:firewallRules, leases: p.role==='admin'?publicLeases:publicLeases.map(({customer_id,...l})=>l),
+    server_time: now(), expiry: { time_zone: BUSINESS_TIME_ZONE, today: localDay(now(),BUSINESS_TIME_ZONE), default_days: Math.min(30,maxDays), default_expire_date: dateAfter(now(),Math.min(30,maxDays),BUSINESS_TIME_ZONE), max_expire_date: dateAfter(now(),maxDays,BUSINESS_TIME_ZONE) }, monitor: { current, history, traffic },
     events, audit: logs };
   const active=Object.fromEntries(Object.entries(a.active).filter(([ip])=>p.role==='admin'||permitted(ip)));
   if (p.role==='admin') return json({...common,role:'admin',customer_id:cid,customers,agent:{updated_at:a.updated_at,error:a.error,mode:a.mode,active,legacy:a.legacy,managed:a.managed}});
@@ -121,18 +122,18 @@ async function dashboard(p: Principal, selected: string | null) {
 }
 async function agent(request: Request, path: string) {
   const key = request.headers.get('Authorization')?.replace(/^Bearer /, '') || '';
-  if (!await matches(key, env.AGENT_KEY_HASH)) throw new Failure(401, '无效服务身份');
+  if (!await matches(key, env.AGENT_KEY_HASH)) throw new Failure(401, 'INVALID_AGENT_CREDENTIAL');
   await rate('agent', 180);
   if (request.method === 'GET' && path === '/api/agent/desired') {
     const rows = await activeLeases(null), desired = new Map<string, number>();
     for (const l of rows) { desired.set(l.ip, Math.max(desired.get(l.ip) || 0, l.expires_at)); if (l.previous_ip && (l.previous_until || 0) > now()) desired.set(l.previous_ip, Math.max(desired.get(l.previous_ip) || 0, l.previous_until!)); }
-    if (desired.size > 180) throw new Failure(409, '当前 IP 数量超过部署保护上限');
+    if (desired.size > 180) throw new Failure(409, 'DEPLOYMENT_CAPACITY_REACHED');
     const entries = [...desired].sort(([a], [b]) => a.localeCompare(b)).map(([ip, expires_at]) => ({ ip, expires_at }));
     const deletionRows=(await db().prepare(`SELECT ref FROM cloud_rules WHERE present=1 AND delete_requested_at IS NOT NULL AND EXISTS(SELECT 1 FROM port_owners WHERE port=${PORT})`).all<{ref:string}>()).results;
     return json({ port: PORT, issued_at: now(), entries, delete_legacy:deletionRows.map(r=>r.ref), digest: await hashed(JSON.stringify(entries)) });
   }
   if (request.method === 'POST' && path === '/api/agent/report') {
-    const data = await body(request, 131072); const cidrs = (x: unknown) => { if (!Array.isArray(x) || x.length > 1000 || x.some(v => typeof v !== 'string' || !/^\d+\.\d+\.\d+\.\d+\/\d{1,2}$/.test(v))) throw new Failure(400, '无效规则清单'); return x as string[]; };
+    const data = await body(request, 131072); const cidrs = (x: unknown) => { if (!Array.isArray(x) || x.length > 1000 || x.some(v => typeof v !== 'string' || !/^\d+\.\d+\.\d+\.\d+\/\d{1,2}$/.test(v))) throw new Failure(400, 'INVALID_INVENTORY'); return x as string[]; };
     const active: Record<string, number> = {}; if (data.active && typeof data.active === 'object') for (const [ip, count] of Object.entries(data.active)) { try { active[publicIPv4(ip)] = integer(count, 0, 100000, 0); } catch { /* Ignore private/internal peers. */ } }
     const traffic: Traffic = {};
     if (data.traffic && typeof data.traffic === 'object' && !Array.isArray(data.traffic)) for (const [ip,value] of Object.entries(data.traffic).slice(0,200)) {
@@ -154,9 +155,9 @@ async function agent(request: Request, path: string) {
       try { const ip = publicIPv4(v.ip); if (typeof v.id !== 'string' || v.id.length > 128) continue; queries.push(db().prepare('INSERT OR IGNORE INTO access_events VALUES(?,?,?,?,?,?,?)').bind(v.id, ip, integer(v.at, now() - 7 * 86400, now() + 60, now()), integer(v.bytes_up, 0, Number.MAX_SAFE_INTEGER, 0), integer(v.bytes_down, 0, Number.MAX_SAFE_INTEGER, 0), Number(v.duration) || 0, String(v.status || '').slice(0, 8))); } catch { /* Invalid telemetry cannot change policy. */ }
     }
     if (Array.isArray(data.existing_rules)) {
-      if (data.existing_rules.length>250) throw new Failure(400,'规则清单过大');
+      if (data.existing_rules.length>250) throw new Failure(400,'INVENTORY_TOO_LARGE');
       const inventory=data.existing_rules as {ref:unknown;cidr:unknown}[];
-      if (inventory.some(r=>!r||typeof r.ref!=='string'||!/^([a-f0-9]{64})$/.test(r.ref)||typeof r.cidr!=='string'||!/^\d+\.\d+\.\d+\.\d+\/\d{1,2}$/.test(r.cidr))) throw new Failure(400,'无效规则清单');
+      if (inventory.some(r=>!r||typeof r.ref!=='string'||!/^([a-f0-9]{64})$/.test(r.ref)||typeof r.cidr!=='string'||!/^\d+\.\d+\.\d+\.\d+\/\d{1,2}$/.test(r.cidr))) throw new Failure(400,'INVALID_INVENTORY');
       queries.push(db().prepare('UPDATE cloud_rules SET present=0'));
       for (const r of inventory) queries.push(db().prepare('INSERT INTO cloud_rules(ref,cidr,present,seen_at) VALUES(?,?,1,?) ON CONFLICT(ref) DO UPDATE SET cidr=excluded.cidr,present=1,seen_at=excluded.seen_at').bind(String(r.ref),String(r.cidr),now()));
       queries.push(db().prepare('UPDATE cloud_rules SET deleted_at=? WHERE present=0 AND delete_requested_at IS NOT NULL AND deleted_at IS NULL').bind(now()));
@@ -165,18 +166,18 @@ async function agent(request: Request, path: string) {
 
     return json({ ok: true });
   }
-  throw new Failure(404, '接口不存在');
+  throw new Failure(404, 'NOT_FOUND');
 }
 async function handle(request: Request): Promise<Response> {
   const u = new URL(request.url), path = u.pathname;
   if (path === '/api/health') return json({ ok: true, port: PORT });
   const boundPortal=await portalForHost(u.hostname);
   if (path==='/api/portal' && request.method==='GET') return json(boundPortal?{mode:'customer',name:boundPortal.name,brand:BRAND,service:'Network Access',port:PORT}:{mode:'operator',name:BRAND,brand:BRAND,service:'Network Operations',port:PORT});
-  if (boundPortal && (path.startsWith('/api/admin/')||path.startsWith('/api/agent/'))) throw new Failure(404,'接口不存在');
+  if (boundPortal && (path.startsWith('/api/admin/')||path.startsWith('/api/agent/'))) throw new Failure(404,'NOT_FOUND');
   if (path.startsWith('/downloads/')) return download(request);
   if (path.startsWith('/api/agent/')) return agent(request, path);
   if (request.method === 'POST' && path === '/api/login') {
-    if (request.headers.has('Origin') && request.headers.get('Origin') !== u.origin) throw new Failure(403, '来源校验失败');
+    if (request.headers.has('Origin') && request.headers.get('Origin') !== u.origin) throw new Failure(403, 'ORIGIN_REJECTED');
     await rate(`login:${request.headers.get('CF-Connecting-IP') || 'unknown'}`, 12);
     const data = await body(request), p = await keyPrincipal(typeof data.key === 'string' ? data.key : ''); portal(p); scoped(p,boundPortal);
     const secret = token('session'); await db().prepare('INSERT INTO sessions VALUES(?,?,?)').bind(await hashed(secret), p.key, now() + 8 * 3600).run();
@@ -190,18 +191,18 @@ async function handle(request: Request): Promise<Response> {
   if (request.method === 'GET' && path === '/api/dashboard') return dashboard(p, u.searchParams.get('customer'));
   if (request.method === 'GET' && path === '/api/ip') { portal(p); const raw = request.headers.get('CF-Connecting-IP') || ''; let ip: string | null = null; try { ip = publicIPv4(raw); } catch { /* IPv6 requires IPv4 script. */ } return json({ detected: raw, ipv4: ip }); }
   if (request.method === 'POST' && path === '/api/device/refresh') {
-    if (p.role !== 'device' || !p.device) throw new Failure(403, '请使用设备专属密钥');
+    if (p.role !== 'device' || !p.device) throw new Failure(403, 'DEVICE_TOKEN_REQUIRED');
     const ip = publicIPv4(request.headers.get('CF-Connecting-IP')), c = await customer(p.customer!), t = now(), leaseId = id();
     const result = await db().prepare(`INSERT INTO leases(id,customer_id,device_id,ip,label,expires_at,created_at,updated_at)
-      SELECT ?,?,?,?,'自动更新',?,?,? WHERE (SELECT COUNT(*) FROM leases WHERE customer_id=? AND revoked_at IS NULL AND expires_at>? AND (device_id IS NULL OR device_id<>?))+${LEGACY_USAGE_SQL}<(SELECT max_ips FROM customers WHERE id=?)
+      SELECT ?,?,?,?,'Automatic update',?,?,? WHERE (SELECT COUNT(*) FROM leases WHERE customer_id=? AND revoked_at IS NULL AND expires_at>? AND (device_id IS NULL OR device_id<>?))+${LEGACY_USAGE_SQL}<(SELECT max_ips FROM customers WHERE id=?)
       AND ${CAPACITY_SQL}
       ON CONFLICT(device_id) DO UPDATE SET previous_ip=CASE WHEN leases.ip<>excluded.ip AND leases.expires_at>? AND leases.revoked_at IS NULL THEN leases.ip ELSE CASE WHEN leases.ip=excluded.ip THEN leases.previous_ip ELSE NULL END END,
       previous_until=CASE WHEN leases.ip<>excluded.ip AND leases.expires_at>? AND leases.revoked_at IS NULL THEN ? ELSE CASE WHEN leases.ip=excluded.ip THEN leases.previous_until ELSE NULL END END,
       ip=excluded.ip,expires_at=excluded.expires_at,revoked_at=NULL,updated_at=excluded.updated_at`).bind(leaseId, c.id, p.device, ip, t + c.lease_minutes * 60, t, t, c.id, t, p.device, c.id, c.id, ip, t, t, t + c.grace_seconds).run();
-    if (!result.meta.changes) throw new Failure(409, 'IP 授权数量已达上限，请先删除其他授权');
+    if (!result.meta.changes) throw new Failure(409, 'AUTHORIZATION_LIMIT_REACHED');
     await db().prepare('UPDATE devices SET last_seen=? WHERE id=?').bind(t, p.device).run();
     const a = await state(); const applied = now() - a.updated_at < 90 && !a.error && a.mode === 'apply' && [...a.managed, ...a.legacy].some(cidr => covers(cidr, ip));
-    return json({ ip, expires_at: t + c.lease_minutes * 60, state: applied ? 'applied' : 'pending', note: '已生效仅表示白名单同步；请另行测试代理连接。' });
+    return json({ ip, expires_at: t + c.lease_minutes * 60, state: applied ? 'applied' : 'pending', note_code: 'FIREWALL_SYNC_ONLY', note: 'Applied confirms firewall synchronization only. Test a new service connection separately.' });
   }
   portal(p);
   if (request.method === 'POST' && path === '/api/admin/customers') {
@@ -214,10 +215,10 @@ async function handle(request: Request): Promise<Response> {
   const rotation = /^\/api\/admin\/customers\/([\w-]+)\/key$/.exec(path);
   if (request.method === 'POST' && rotation) {
     admin(p); const c = await customer(rotation[1]), data=await body(request), secret = data.token===undefined?token('customer'):data.token;
-    if (typeof secret!=='string'||secret.length<8||secret.length>128||/[\x00-\x1f\x7f]/.test(secret)) throw new Failure(400,'访问令牌长度须为 8–128 个字符');
-    if (await matches(secret,env.ADMIN_KEY_HASH)||await matches(secret,env.AGENT_KEY_HASH)) throw new Failure(409,'访问令牌不能复用运营或服务凭据');
+    if (typeof secret!=='string'||secret.length<8||secret.length>128||/[\x00-\x1f\x7f]/.test(secret)) throw new Failure(400,'INVALID_TOKEN_LENGTH');
+    if (await matches(secret,env.ADMIN_KEY_HASH)||await matches(secret,env.AGENT_KEY_HASH)) throw new Failure(409,'TOKEN_REUSE_FORBIDDEN');
     const tokenHash=await hashed(secret), existing=await db().prepare('SELECT customer_id,kind FROM api_keys WHERE token_hash=?').bind(tokenHash).first<{customer_id:string;kind:string}>();
-    if (existing&&(existing.customer_id!==c.id||existing.kind!=='customer')) throw new Failure(409,'该令牌不可用于当前账户');
+    if (existing&&(existing.customer_id!==c.id||existing.kind!=='customer')) throw new Failure(409,'TOKEN_ALREADY_ASSIGNED');
     await db().batch([
       db().prepare("DELETE FROM sessions WHERE key_id IN (SELECT id FROM api_keys WHERE customer_id=? AND kind='customer')").bind(c.id),
       db().prepare("UPDATE api_keys SET revoked_at=? WHERE customer_id=? AND kind='customer'").bind(now(), c.id),
@@ -228,10 +229,10 @@ async function handle(request: Request): Promise<Response> {
   if (request.method==='POST'&&portalMatch) {
     admin(p);const c=await customer(portalMatch[1]),data=await body(request),hostname=portalHostname(data.hostname);
     const existing=await db().prepare('SELECT customer_id FROM client_portals WHERE hostname=?').bind(hostname).first<{customer_id:string}>();
-    if (existing&&existing.customer_id!==c.id) throw new Failure(409,'该入口已经绑定到其他账户');
+    if (existing&&existing.customer_id!==c.id) throw new Failure(409,'HOST_ALREADY_BOUND');
     if (data.manage_existing_rules===true) {
       const owner=await db().prepare(`SELECT customer_id FROM port_owners WHERE port=${PORT}`).first<{customer_id:string}>();
-      if (owner&&owner.customer_id!==c.id) throw new Failure(409,'端口现有规则已分配到其他账户');
+      if (owner&&owner.customer_id!==c.id) throw new Failure(409,'PORT_ALREADY_DELEGATED');
       await db().prepare(`INSERT INTO port_owners(port,customer_id) VALUES(${PORT},?) ON CONFLICT(port) DO UPDATE SET customer_id=excluded.customer_id`).bind(c.id).run();
     }
     await db().prepare('INSERT INTO client_portals(hostname,customer_id) VALUES(?,?) ON CONFLICT(customer_id) DO UPDATE SET hostname=excluded.hostname').bind(hostname,c.id).run();
@@ -242,8 +243,8 @@ async function handle(request: Request): Promise<Response> {
     admin(p); const c = await customer(customerMatch[1]), data = await body(request);
     const devices = integer(data.max_devices, 1, 10, c.max_devices), ips = integer(data.max_ips, 1, 100, c.max_ips);
     const usage = await db().prepare(`SELECT (SELECT count(*) FROM devices WHERE customer_id=? AND enabled=1) AS devices,(SELECT count(*) FROM leases WHERE customer_id=? AND revoked_at IS NULL AND expires_at>?)+${LEGACY_USAGE_SQL} AS ips`).bind(c.id, c.id, now(), c.id).first<{ devices: number; ips: number }>();
-    if (devices < (usage?.devices || 0) || ips < (usage?.ips || 0)) throw new Failure(409, '请先减少已有设备/IP，再降低额度');
-    const tier=data.tier === undefined ? c.tier : data.tier; if (!['standard','vip'].includes(String(tier))) throw new Failure(400,'客户等级无效');
+    if (devices < (usage?.devices || 0) || ips < (usage?.ips || 0)) throw new Failure(409, 'QUOTA_BELOW_USAGE');
+    const tier=data.tier === undefined ? c.tier : data.tier; if (!['standard','vip'].includes(String(tier))) throw new Failure(400,'INVALID_CUSTOMER_TIER');
     await db().prepare('UPDATE customers SET name=?,enabled=?,max_devices=?,max_ips=?,lease_minutes=?,grace_seconds=?,max_manual_days=?,tier=? WHERE id=?').bind(data.name===undefined?c.name:label(data.name), data.enabled === undefined ? c.enabled : data.enabled ? 1 : 0, devices, ips, integer(data.lease_minutes, 5, 10080, c.lease_minutes), integer(data.grace_seconds, 0, 600, c.grace_seconds), integer(data.max_manual_days, 1, 365, c.max_manual_days), String(tier), c.id).run();
     await audit(c.id, 'customer.settings', null, '调整状态或额度'); return json({ ok: true });
   }
@@ -251,7 +252,7 @@ async function handle(request: Request): Promise<Response> {
     const data = await body(request), cid = customerId(p, typeof data.customer_id === 'string' ? data.customer_id : null), c = await customer(cid);
     const did = id(), secret = token('device');
     const result = await db().prepare('INSERT INTO devices(id,customer_id,name,created_at) SELECT ?,?,?,? WHERE (SELECT count(*) FROM devices WHERE customer_id=? AND enabled=1)<? AND EXISTS(SELECT 1 FROM customers WHERE id=? AND enabled=1)').bind(did, cid, label(data.name), now(), cid, c.max_devices, cid).run();
-    if (!result.meta.changes) throw new Failure(409, '设备数量已达上限或客户已停用');
+    if (!result.meta.changes) throw new Failure(409, 'DEVICE_LIMIT_REACHED');
     try { await db().prepare("INSERT INTO api_keys(id,token_hash,kind,customer_id,device_id,created_at) VALUES(?,?,'device',?,?,?)").bind(id(), await hashed(secret), cid, did, now()).run(); }
     catch (e) { await db().prepare('DELETE FROM devices WHERE id=?').bind(did).run(); throw e; }
     await audit(cid, 'device.created', null, label(data.name)); return json({ id: did, key: secret }, 201);
@@ -259,50 +260,50 @@ async function handle(request: Request): Promise<Response> {
   const deviceMatch = /^\/api\/devices\/([\w-]+)$/.exec(path);
   if (request.method === 'DELETE' && deviceMatch) {
     const row = await db().prepare('SELECT customer_id,name FROM devices WHERE id=?').bind(deviceMatch[1]).first<{ customer_id: string; name: string }>();
-    if (!row || (p.role !== 'admin' && row.customer_id !== p.customer)) throw new Failure(404, '设备不存在');
+    if (!row || (p.role !== 'admin' && row.customer_id !== p.customer)) throw new Failure(404, 'DEVICE_NOT_FOUND');
     await db().batch([db().prepare('UPDATE devices SET enabled=0 WHERE id=?').bind(deviceMatch[1]), db().prepare('UPDATE api_keys SET revoked_at=? WHERE device_id=?').bind(now(), deviceMatch[1]), db().prepare('UPDATE leases SET revoked_at=? WHERE device_id=?').bind(now(), deviceMatch[1])]);
     await audit(row.customer_id, 'device.revoked', null, row.name); return json({ ok: true });
   }
   if (request.method === 'POST' && path === '/api/leases') {
     const data = await body(request), cid = customerId(p, typeof data.customer_id === 'string' ? data.customer_id : null), c = await customer(cid), ip = publicIPv4(data.ip), t = now();
-    const {expiresAt,expireDate} = expiry(data,t,c.max_manual_days);
+    const {expiresAt,expireDate} = expiry(data,t,c.max_manual_days,BUSINESS_TIME_ZONE);
     const result = await db().prepare(`INSERT INTO leases(id,customer_id,ip,label,expires_at,created_at,updated_at)
       SELECT ?,?,?,?,?,?,? WHERE (SELECT count(*) FROM leases WHERE customer_id=? AND revoked_at IS NULL AND expires_at>?)+${LEGACY_USAGE_SQL}<(SELECT max_ips FROM customers WHERE id=?)
       AND ${CAPACITY_SQL}
       AND NOT EXISTS(SELECT 1 FROM leases WHERE customer_id=? AND device_id IS NULL AND ip=? AND revoked_at IS NULL AND expires_at>?)
-      AND EXISTS(SELECT 1 FROM customers WHERE id=? AND enabled=1)`).bind(id(), cid, ip, label(typeof data.label==='string'&&data.label.trim()?data.label:undefined, '手动授权'), expiresAt, t, t, cid, t, cid, cid, ip, cid, ip, t, cid).run();
-    if (!result.meta.changes) throw new Failure(409, '地址已授权、额度已满或客户已停用');
-    await audit(cid, 'ip.added', ip, `手动授权，${expireDate} 00:00 UTC+8 到期`); return json({ state: 'pending', expires_at: expiresAt, expire_date: expireDate }, 201);
+      AND EXISTS(SELECT 1 FROM customers WHERE id=? AND enabled=1)`).bind(id(), cid, ip, label(typeof data.label==='string'&&data.label.trim()?data.label:undefined, 'Manual authorization'), expiresAt, t, t, cid, t, cid, cid, ip, cid, ip, t, cid).run();
+    if (!result.meta.changes) throw new Failure(409, 'AUTHORIZATION_CONFLICT');
+    await audit(cid, 'ip.added', ip, `Manual grant; expires ${new Date(expiresAt*1000).toISOString()} (${BUSINESS_TIME_ZONE})`); return json({ state: 'pending', expires_at: expiresAt, expire_date: expireDate }, 201);
   }
   const cloudRule=/^\/api\/firewall-rules\/([a-f0-9]{64})$/.exec(path);
   if (request.method==='DELETE'&&cloudRule) {
     const r=await db().prepare(`SELECT ref,cidr FROM cloud_rules WHERE ref=? AND present=1 AND EXISTS(SELECT 1 FROM port_owners WHERE port=${PORT} ${p.role==='admin'?'':'AND customer_id=?'})`).bind(...(p.role==='admin'?[cloudRule[1]]:[cloudRule[1],p.customer])).first<{ref:string;cidr:string}>();
-    if (!r) throw new Failure(404,'授权不存在或不属于当前入口');
+    if (!r) throw new Failure(404,'RULE_NOT_FOUND');
     const grants=await activeLeases(null);
-    if (r.cidr.endsWith('/32')&&grants.some(l=>covers(r.cidr,l.ip))) throw new Failure(409,'该来源仍有有效 IP 授权，请先删除对应授权，再删除这条现有规则');
+    if (r.cidr.endsWith('/32')&&grants.some(l=>covers(r.cidr,l.ip))) throw new Failure(409,'RULE_STILL_REQUIRED');
     await db().prepare('UPDATE cloud_rules SET delete_requested_at=? WHERE ref=?').bind(now(),r.ref).run();
-    await audit(p.customer,'ip.cloud_deleted',r.cidr,`删除现有 TCP ${PORT} 来源授权`);return json({state:'pending',note:`正在同步删除该来源的 TCP ${PORT} 授权`},202);
+    await audit(p.customer,'ip.cloud_deleted',r.cidr,`删除现有 TCP ${PORT} 来源授权`);return json({state:'pending',note_code:'RULE_DELETION_PENDING',note:`Removing this source authorization for TCP ${PORT}.`},202);
   }
   const leaseMatch = /^\/api\/leases\/([\w-]+)$/.exec(path);
   if (request.method === 'PATCH' && leaseMatch) {
     const row = await db().prepare('SELECT * FROM leases WHERE id=?').bind(leaseMatch[1]).first<Lease>();
-    if (!row || (p.role !== 'admin' && row.customer_id !== p.customer)) throw new Failure(404,'授权不存在');
-    if (row.device_id) throw new Failure(400,'自动设备的有效期由心跳续期管理');
-    const c=await customer(row.customer_id), t=now(), value=expiry(await body(request),t,c.max_manual_days);
+    if (!row || (p.role !== 'admin' && row.customer_id !== p.customer)) throw new Failure(404,'AUTHORIZATION_NOT_FOUND');
+    if (row.device_id) throw new Failure(400,'AUTOMATIC_EXPIRY_MANAGED');
+    const c=await customer(row.customer_id), t=now(), value=expiry(await body(request),t,c.max_manual_days,BUSINESS_TIME_ZONE);
     const result=await db().prepare(`UPDATE leases SET expires_at=?,revoked_at=NULL,updated_at=? WHERE id=?
       AND EXISTS(SELECT 1 FROM customers WHERE id=? AND enabled=1)
       AND (SELECT count(*) FROM leases WHERE customer_id=? AND id<>? AND revoked_at IS NULL AND expires_at>?)+${LEGACY_USAGE_SQL}<(SELECT max_ips FROM customers WHERE id=?)
       AND ${CAPACITY_SQL}`).bind(value.expiresAt,t,row.id,c.id,c.id,row.id,t,c.id,c.id,row.ip).run();
-    if (!result.meta.changes) throw new Failure(409,'授权额度或部署 IP 容量已满，或客户已停用');
-    await audit(c.id,'ip.renewed',row.ip,`续期至 ${value.expireDate} 00:00 UTC+8`); return json({expires_at:value.expiresAt,expire_date:value.expireDate});
+    if (!result.meta.changes) throw new Failure(409,'RENEWAL_CONFLICT');
+    await audit(c.id,'ip.renewed',row.ip,`Renewed until ${new Date(value.expiresAt*1000).toISOString()} (${BUSINESS_TIME_ZONE})`); return json({expires_at:value.expiresAt,expire_date:value.expireDate});
   }
   if (request.method === 'DELETE' && leaseMatch) {
     const row = await db().prepare('SELECT customer_id,ip FROM leases WHERE id=?').bind(leaseMatch[1]).first<{ customer_id: string; ip: string }>();
-    if (!row || (p.role !== 'admin' && row.customer_id !== p.customer)) throw new Failure(404, '授权不存在');
+    if (!row || (p.role !== 'admin' && row.customer_id !== p.customer)) throw new Failure(404, 'AUTHORIZATION_NOT_FOUND');
     await db().prepare('UPDATE leases SET revoked_at=? WHERE id=?').bind(now(), leaseMatch[1]).run();
     await audit(row.customer_id, 'ip.revoked', row.ip, '撤销 IP；自动设备下次心跳可重新授权，永久停用请撤销设备'); return json({ ok: true });
   }
-  throw new Failure(404, '接口不存在');
+  throw new Failure(404, 'NOT_FOUND');
 }
 export default {
   async fetch(request: Request) {
@@ -311,9 +312,10 @@ export default {
       response.headers.set('X-Content-Type-Options', 'nosniff'); response.headers.set('Referrer-Policy', 'no-referrer'); response.headers.set('X-Frame-Options', 'DENY');
       return response;
     } catch (e) {
-      const status = e instanceof Failure ? e.status : e instanceof Error && /公网|数值范围|到期日期|授权已改|专属域名/.test(e.message) ? 400 : 500;
+      const status = e instanceof Failure ? e.status : 500;
+      const code = e instanceof Failure ? e.code : 'SERVICE_UNAVAILABLE';
       if (status === 500) console.error(JSON.stringify({ event: 'request_failed', path: new URL(request.url).pathname, type: e instanceof Error ? e.name : 'unknown', detail: e instanceof Error ? e.message.replace(/(?:\d{1,3}\.){3}\d{1,3}/g,'[address]').replace(/pa_[A-Za-z0-9_-]+/g,'[credential]').slice(0,400) : 'unknown' }));
-      return json({ error: status === 500 ? '服务暂时不可用，请稍后重试' : e instanceof Error ? e.message : '请求失败' }, status);
+      return json({ code, params: e instanceof Failure ? e.params : {}, error: errorMessages[code].en }, status);
     }
   },
   async scheduled() {

@@ -16,3 +16,13 @@ __pycache__/
 reports/
 *.pem
 *.key
+
+demo-dist/
+site-dist/
+docs-site/.astro/
+docs-site/dist/
+
+.astro/
+
+/docs-site/public/screenshots/
+/docs-site/public/favicon.svg

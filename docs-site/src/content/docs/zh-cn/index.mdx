@@ -1,0 +1,50 @@
+---
+title: 让您的网络，安全通行。
+description: 面向客户的阿里云单端口 IP 自助白名单。
+template: splash
+hero:
+  tagline: 客户自主管理网络访问，云凭据始终留在 ECS。
+  image:
+    file: ../../../../public/screenshots/portal-zh.png
+    alt: 客户门户，演示地址已掩码
+  actions:
+    - text: 体验交互演示
+      link: /port-allowlist/demo/?lang=zh-CN
+      icon: right-arrow
+      variant: primary
+    - text: 部署自己的服务
+      link: /port-allowlist/zh-cn/quick-start/
+      icon: right-arrow
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="先把授权管理做好" icon="approve-check">
+    添加网络、选择零点到期日、查看同步结果。每位客户只能看到自己的授权与访问活动。
+  </Card>
+  <Card title="云凭据只在 ECS" icon="lock-locked">
+    Cloudflare 提供网页和协调数据库，ECS 同步器以受限权限维护一个阿里云安全组的一个 TCP 端口。
+  </Card>
+  <Card title="真正可以操作的演示" icon="laptop">
+    体验授权增删续期，切换中英、主题、角色和异常状态。演示不调用任何云 API。
+  </Card>
+</CardGrid>
+
+## 无需云凭据即可体验
+
+```sh
+git clone https://github.com/kongdayan/port-allowlist.git
+cd port-allowlist
+npm ci
+npm run demo
+```
+
+打开 Vite 输出的本地地址。演示数据只保留在浏览器内存中，不会开放防火墙端口。如需体验真实 API 与 SQLite 持久存储，请按[本地快速开始](/port-allowlist/zh-cn/quick-start/)操作。
+
+## 当前支持范围
+
+阿里云 ECS 安全组、一个配置好的 TCP 端口、精确公网 IPv4 授权。控制面使用 Cloudflare Workers 与 SQLite Durable Objects。v0.2 不包含 Terraform 或其他云适配器。
+
+[安全边界](/port-allowlist/zh-cn/security/) · [从 v0.1 升级](/port-allowlist/zh-cn/upgrade/) · [MIT 开源代码](https://github.com/kongdayan/port-allowlist)
