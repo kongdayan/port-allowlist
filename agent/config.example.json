@@ -1,0 +1,10 @@
+{
+  "control_url": "https://access.example.com",
+  "region": "REPLACE_REGION",
+  "security_group_id": "REPLACE_SECURITY_GROUP_ID",
+  "port": 10800,
+  "apply": false,
+  "poll_seconds": 10,
+  "state_file": "/var/lib/port-allowlist/state.json",
+  "log_file": "/var/log/port-allowlist/sessions.log"
+}

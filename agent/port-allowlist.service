@@ -1,0 +1,22 @@
+[Unit]
+Description=Single-port IP allowlist synchronizer
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=port-allowlist
+Group=port-allowlist
+EnvironmentFile=/etc/port-allowlist/credentials.env
+ExecStart=/usr/bin/python3 /opt/port-allowlist/agent.py --config /etc/port-allowlist/config.json
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/port-allowlist
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryMax=96M
+CPUQuota=20%
+[Install]
+WantedBy=multi-user.target

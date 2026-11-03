@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {chromium} from 'playwright';
+const fixtureIP=(...octets)=>octets.join('.');
+const directory=await mkdtemp(join(tmpdir(),'port-allowlist-browser-'));
+const origin='http://localhost:8799', clientOrigin='http://client.localhost:8799';
+const {admin,agent}=JSON.parse(await readFile('.local/credentials.json','utf8'));
+const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--port','8799','--strictPort'],{env:{...process.env,PORT_ALLOWLIST_TEST_STATE:directory},stdio:['ignore','pipe','pipe']});
+let serverOutput='';for(const stream of [server.stdout,server.stderr])stream.on('data',data=>{serverOutput=(serverOutput+data.toString()).slice(-12000);});
+let browser;
+const request=async(path,{key=admin,method='GET',data}={})=>{const response=await fetch(origin+path,{method,headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});assert.ok(response.ok,'API status '+response.status+' for '+path);return response.json();};
+try{
+ let ready=false;for(let i=0;i<100;i++){if(server.exitCode!==null)throw Error('Local server stopped');try{if((await fetch(origin+'/api/health')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,200));}assert.ok(ready,'Local server readiness timeout');
+ const customer=await request('/api/admin/customers',{method:'POST',data:{name:'Example Team'}});
+ await request('/api/admin/customers/'+customer.id,{method:'PATCH',data:{max_ips:100,max_devices:10}});
+ await request('/api/admin/customers/'+customer.id+'/portal',{method:'POST',data:{hostname:'client.localhost',manage_existing_rules:true}});
+ browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{})});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',error=>errors.push(error.name));
+ await page.goto(clientOrigin);await page.locator('#key').fill(customer.key);await page.locator('#login button').click();await page.locator('#add-ip').waitFor();
+ assert.match(await page.locator('#active-quota').innerText(),/0 \/ 100/);
+ assert.equal(await page.locator('#settings').count(),0);
+ await page.locator('#add-ip [name=ip]').fill(fixtureIP(11,0,0,211));
+ await page.locator('#add-ip [name=label]').fill('Synthetic browser test');await page.locator('#add-ip button[type=submit],#add-ip button:not([type])').last().click();
+ await page.locator('#allowlist .renew-ip').first().waitFor();
+ await page.locator('#allowlist .renew-ip').first().click();await page.locator('#renew-ip-form [name=days]').fill('45');await page.locator('#renew-ip-form [type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#expiry-dialog').open);
+ await page.locator('[data-diagram=architecture]').click();assert.ok(await page.locator('.architecture').count());
+ await page.locator('#allowlist .revoke-ip').first().click();await page.waitForFunction(()=>!document.querySelector('.revoke-ip'));
+ const reference='a'.repeat(64),source=fixtureIP(11,0,0,212)+'/32';
+ await request('/api/agent/report',{key:agent,method:'POST',data:{managed:[],legacy:[source],existing_rules:[{ref:reference,cidr:source}],active:{},mode:'apply',events:[]}});
+ await page.locator('#refresh').click();await page.locator('.delete-firewall').waitFor();await page.locator('.delete-firewall').click();await page.waitForFunction(()=>!document.querySelector('.delete-firewall'));
+ assert.deepEqual((await request('/api/agent/desired',{key:agent})).delete_legacy,[reference]);
+ await request('/api/agent/report',{key:agent,method:'POST',data:{managed:[],legacy:[],existing_rules:[],active:{},mode:'apply',events:[]}});
+ await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('[data-firewall-ref]'));
+ await page.locator('#detect-ip').click();
+ const dashboard=await page.evaluate(()=>fetch('/api/dashboard').then(r=>r.json()));assert.equal(dashboard.customers,undefined);assert.equal(dashboard.customer_id,undefined);assert.equal(dashboard.agent,undefined);
+ await page.setViewportSize({width:390,height:844});await page.reload();await page.locator('#add-ip').waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
+ assert.deepEqual(errors,[]);console.log('Browser passed: login, quota, add, calendar renewal, delete grant, delete existing rule and confirmation, diagram, tenant filtering, mobile layout.');
+}catch(error){console.error('Browser verification failed:',error.message);process.exitCode=1;}
+finally{await browser?.close();server.kill('SIGTERM');await new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve);});await rm(directory,{recursive:true,force:true});}
